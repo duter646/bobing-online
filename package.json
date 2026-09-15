@@ -1,0 +1,22 @@
+{
+  "name": "bobing-online",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "build:backend": "pnpm --filter @bobing/server... build",
+    "dev:server": "pnpm --filter @bobing/server dev",
+    "start:server": "pnpm --filter @bobing/server start",
+    "test": "pnpm build && pnpm -r test",
+    "test:backend": "pnpm build:backend && pnpm --filter @bobing/domain test && pnpm --filter @bobing/server test",
+    "test:acceptance": "pnpm build:backend && pnpm --filter @bobing/server exec vitest run src/acceptance.test.ts",
+    "benchmark:server": "pnpm build:backend && pnpm --filter @bobing/server benchmark",
+    "typecheck": "pnpm -r typecheck",
+    "dev:web": "pnpm --filter @bobing/web dev",
+    "dev": "pnpm --parallel --filter @bobing/server --filter @bobing/web dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
