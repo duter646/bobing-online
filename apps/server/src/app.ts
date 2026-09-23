@@ -10,6 +10,9 @@ import { RoomService } from "./room-service.js";
 import { RateLimiter } from "./rate-limiter.js";
 
 const sessionSchema = z.object({ displayName: z.string() }).strict();
+const registerSchema = z.object({ email: z.string(), password: z.string(), displayName: z.string() }).strict();
+const loginSchema = z.object({ email: z.string(), password: z.string() }).strict();
+const sessionNameSchema = z.object({ displayName: z.string() }).strict();
 const createRoomSchema = z.object({ maxPlayers: z.number().int().optional() }).strict();
 const joinRoomSchema = z.object({ code: z.string().min(6).max(6) }).strict();
 const startRoomSchema = z.object({ expectedRoomVersion: z.number().int().nonnegative().optional() }).strict();
@@ -68,9 +71,29 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
         const body = sessionSchema.parse(await readJson(request));
         return send(response, 201, service.createSession(body.displayName));
       }
+      if (request.method === "POST" && url.pathname === "/api/auth/register") {
+        rateLimiter.consume(`register:${request.socket.remoteAddress ?? "unknown"}`, 10, 60_000);
+        const body = registerSchema.parse(await readJson(request));
+        return send(response, 201, await service.register(body.email, body.password, body.displayName));
+      }
+      if (request.method === "POST" && url.pathname === "/api/auth/login") {
+        rateLimiter.consume(`login:${request.socket.remoteAddress ?? "unknown"}`, 20, 60_000);
+        const body = loginSchema.parse(await readJson(request));
+        return send(response, 200, await service.login(body.email, body.password));
+      }
       const publicReportMatch = url.pathname.match(/^\/api\/reports\/([^/]+)$/);
       if (request.method === "GET" && publicReportMatch) return send(response, 200, service.getPublicReport(publicReportMatch[1]!, url.searchParams.get("token") ?? ""));
       const session = service.authenticate(bearer(request));
+      if (request.method === "GET" && url.pathname === "/api/auth/me") return send(response, 200, service.identity(session));
+      if (request.method === "GET" && url.pathname === "/api/me/stats") return send(response, 200, service.stats(session));
+      if (request.method === "POST" && url.pathname === "/api/session/name") {
+        const body = sessionNameSchema.parse(await readJson(request));
+        return send(response, 200, service.updateSessionName(session, body.displayName));
+      }
+      if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+        service.logout(session);
+        return send(response, 200, { loggedOut: true });
+      }
       if (request.method === "POST" && url.pathname === "/api/rooms") {
         rateLimiter.consume(`room-create:${session.id}`, 10, 60_000);
         const body = createRoomSchema.parse(await readJson(request));
@@ -120,6 +143,14 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
   const presenceGraceMs = options.presenceGraceMs ?? 10_000;
   let closing = false;
   const presenceKey = (roomId: string, sessionId: string) => `${roomId}:${sessionId}`;
+  const presenceIdentity = (session: { id: string; userId?: string }) => session.userId ?? session.id;
+
+  const publishPresence = (session: { id: string; displayName: string; userId?: string }, roomId: string, online: boolean): void => {
+    const event = service.setPresence(session, roomId, online);
+    if (event) io.to(roomId).emit("room:member-updated", event);
+    const turnEvent = service.skipOfflineTurns(roomId);
+    if (turnEvent) io.to(roomId).emit("game:turn-changed", turnEvent);
+  };
 
   const assertWritable = (socket: import("socket.io").Socket, roomId: string): void => {
     const readOnlyRooms = socket.data.readOnlyRooms as Set<string> | undefined;
@@ -130,7 +161,7 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
     const subscribed = (socket.data.subscribedRooms ??= new Set<string>()) as Set<string>;
     if (subscribed.has(roomId)) return;
     subscribed.add(roomId);
-    const key = presenceKey(roomId, socket.data.session.id);
+    const key = presenceKey(roomId, presenceIdentity(socket.data.session));
     const pending = pendingOffline.get(key);
     if (pending) { clearTimeout(pending); pendingOffline.delete(key); }
     const connections = presenceConnections.get(key) ?? new Set<string>();
@@ -142,10 +173,7 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
     ((socket.data.readOnlyRooms ??= new Set<string>()) as Set<string>).delete(roomId);
     connections.add(socket.id);
     presenceConnections.set(key, connections);
-    if (wasOffline) {
-      const event = service.setPresence(socket.data.session, roomId, true);
-      if (event) io.to(roomId).emit("room:member-updated", event);
-    }
+    if (wasOffline) publishPresence(socket.data.session, roomId, true);
   };
 
   const removePresence = (socket: import("socket.io").Socket): void => {
@@ -153,7 +181,7 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
     const subscribed = socket.data.subscribedRooms as Set<string> | undefined;
     if (!subscribed) return;
     for (const roomId of subscribed) {
-      const key = presenceKey(roomId, socket.data.session.id);
+      const key = presenceKey(roomId, presenceIdentity(socket.data.session));
       const connections = presenceConnections.get(key);
       connections?.delete(socket.id);
       if (connections && connections.size > 0) {
@@ -167,8 +195,7 @@ export function createApplication(options: { dbPath?: string; random?: RandomSou
           pendingOffline.delete(key);
           if (presenceConnections.has(key)) return;
           try {
-            const event = service.setPresence(socket.data.session, roomId, false);
-            if (event) io.to(roomId).emit("room:member-updated", event);
+            publishPresence(socket.data.session, roomId, false);
           } catch {
             // Disconnect cleanup must not crash the realtime server.
           }

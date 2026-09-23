@@ -1,0 +1,74 @@
+[
+  {
+    "kind": "visual",
+    "triangles": 27264,
+    "loader": "Three.js GLTFLoader",
+    "cavityRaycasts": [
+      {
+        "radius": 0,
+        "height": 0.024000000208616257
+      },
+      {
+        "radius": 0.025,
+        "height": 0.024078332085123222
+      },
+      {
+        "radius": 0.055,
+        "height": 0.024855225457099173
+      },
+      {
+        "radius": 0.09,
+        "height": 0.03081685087764391
+      },
+      {
+        "radius": 0.12,
+        "height": 0.04779819321738299
+      },
+      {
+        "radius": 0.145,
+        "height": 0.07578789997528698
+      },
+      {
+        "radius": 0.165,
+        "height": 0.11037631691057226
+      }
+    ],
+    "embeddedTextureHeadersChecked": true
+  },
+  {
+    "kind": "collision",
+    "triangles": 2496,
+    "loader": "Three.js GLTFLoader",
+    "cavityRaycasts": [
+      {
+        "radius": 0,
+        "height": 0.024000000208616257
+      },
+      {
+        "radius": 0.025,
+        "height": 0.024104562869561585
+      },
+      {
+        "radius": 0.055,
+        "height": 0.024886454632134014
+      },
+      {
+        "radius": 0.09,
+        "height": 0.03139259220218216
+      },
+      {
+        "radius": 0.12,
+        "height": 0.0480972438589955
+      },
+      {
+        "radius": 0.145,
+        "height": 0.0764560972959499
+      },
+      {
+        "radius": 0.165,
+        "height": 0.11087895538028777
+      }
+    ],
+    "embeddedTextureHeadersChecked": false
+  }
+]

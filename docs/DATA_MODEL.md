@@ -10,6 +10,17 @@
 
 ## 2. 表结构
 
+### `users`
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 用户主键 |
+| `email` | 规范化为小写的唯一邮箱 |
+| `password_hash` | 带随机盐的 scrypt 哈希，不保存明文密码 |
+| `display_name` | 登录后自动填充的默认名字 |
+| `created_at` | 注册时间 |
+| `last_login_at` | 最近登录时间 |
+
 ### `guest_sessions`
 
 | 字段             | 说明        |
@@ -17,6 +28,8 @@
 | `id`           | ULID 主键   |
 | `token_hash`   | 会话令牌哈希，唯一 |
 | `display_name` | 默认昵称      |
+| `user_id` | 可选的注册用户 ID；为空表示游客 |
+| `revoked_at` | 退出登录后的吊销时间 |
 | `avatar_key`   | 可选的预设头像   |
 | `created_at`   | 创建时间      |
 | `expires_at`   | 过期时间      |

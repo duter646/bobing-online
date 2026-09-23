@@ -39,7 +39,7 @@ export type TransferHostCommand = z.infer<typeof transferHostCommandSchema>;
 export const protocolErrorCodes = [
   "UNAUTHENTICATED", "ROOM_NOT_FOUND", "ROOM_FULL", "ROOM_LOCKED", "NOT_A_MEMBER", "NOT_HOST",
   "INVALID_ROOM_STATE", "NOT_YOUR_TURN", "STALE_ROOM_VERSION", "COMMAND_CONFLICT", "RATE_LIMITED",
-  "VALIDATION_FAILED", "PERSISTENCE_FAILED"
+  "VALIDATION_FAILED", "PERSISTENCE_FAILED", "EMAIL_EXISTS", "INVALID_CREDENTIALS"
 ] as const;
 
 export type ProtocolErrorCode = (typeof protocolErrorCodes)[number];

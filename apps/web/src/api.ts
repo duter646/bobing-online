@@ -1,7 +1,12 @@
-import type { Report,Room,Session } from "./types";
+import type { Report,Room,Session,UserStats } from "./types";
 const base=(import.meta.env.VITE_API_BASE as string|undefined)??"";
 async function request<T>(path:string,init:RequestInit={},token?:string):Promise<T>{const response=await fetch(`${base}${path}`,{...init,headers:{"content-type":"application/json",...(token?{authorization:`Bearer ${token}`}:{}),...init.headers}});const body=await response.json().catch(()=>({})) as {error?:{message?:string}};if(!response.ok)throw new Error(body.error?.message??"请求失败，请稍后重试");return body as T}
 export async function createSession(displayName:string):Promise<Session>{const data=await request<Omit<Session,"displayName">>("/api/sessions",{method:"POST",body:JSON.stringify({displayName})});return{...data,displayName}}
+export async function register(email:string,password:string,displayName:string):Promise<Session>{const data=await request<Omit<Session,"displayName">>("/api/auth/register",{method:"POST",body:JSON.stringify({email,password,displayName})});return{...data,displayName:data.account!.displayName}}
+export async function login(email:string,password:string):Promise<Session>{const data=await request<Omit<Session,"displayName">>("/api/auth/login",{method:"POST",body:JSON.stringify({email,password})});return{...data,displayName:data.account!.displayName}}
+export const updateSessionName=(token:string,displayName:string)=>request<{displayName:string}>("/api/session/name",{method:"POST",body:JSON.stringify({displayName})},token);
+export const logout=(token:string)=>request<{loggedOut:boolean}>("/api/auth/logout",{method:"POST",body:"{}"},token);
+export const getStats=(token:string)=>request<UserStats>("/api/me/stats",{},token);
 export const createRoom=(token:string,maxPlayers:number)=>request<Room>("/api/rooms",{method:"POST",body:JSON.stringify({maxPlayers})},token);
 export const joinRoom=(token:string,code:string)=>request<Room>("/api/rooms/join",{method:"POST",body:JSON.stringify({code})},token);
 export const getRoom=(token:string,id:string)=>request<Room>(`/api/rooms/${id}`,{},token);

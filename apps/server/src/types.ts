@@ -6,6 +6,7 @@ export type RoomState = "LOBBY" | "PLAYING" | "PAUSED" | "FINISHED" | "EXPIRED";
 export interface Member {
   id: string;
   sessionId: string;
+  userId?: string;
   displayName: string;
   seatNo: number;
   role: "HOST" | "PLAYER";

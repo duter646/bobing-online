@@ -1,0 +1,47 @@
+{
+  "visual": {
+    "file": "bowl-visual.glb",
+    "triangles": 27264,
+    "vertices": 13705,
+    "bytes": 819864,
+    "watertight": true,
+    "zero_area_faces": 0,
+    "winding": "outward",
+    "volume_m3": 0.002039188804593288,
+    "bounds_m": [
+      [
+        -0.18,
+        0.0,
+        -0.18
+      ],
+      [
+        0.18,
+        0.130236328125,
+        0.18
+      ]
+    ]
+  },
+  "collision": {
+    "file": "bowl-collision.glb",
+    "triangles": 2496,
+    "vertices": 1250,
+    "bytes": 61244,
+    "watertight": true,
+    "zero_area_faces": 0,
+    "winding": "outward",
+    "volume_m3": 0.0020142123075312466,
+    "bounds_m": [
+      [
+        -0.18,
+        0.0,
+        -0.18
+      ],
+      [
+        0.18,
+        0.13011111111111112,
+        0.18
+      ]
+    ],
+    "surface_error_upper_bound_mm": 1.39
+  }
+}

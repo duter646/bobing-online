@@ -20,7 +20,11 @@ export class Repository {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS guest_sessions (
         id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
-        created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+        user_id TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+        display_name TEXT NOT NULL, created_at TEXT NOT NULL, last_login_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS rooms (
         id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, public_token_hash TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, rule_preset_id TEXT NOT NULL,
@@ -73,18 +77,66 @@ export class Repository {
     if (!prizeColumns.some((column) => column.name === "display_name")) this.db.exec("ALTER TABLE prize_pools ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
     const roomColumns = this.db.prepare("PRAGMA table_info(rooms)").all() as Array<{ name: string }>;
     if (!roomColumns.some((column) => column.name === "public_token_hash")) this.db.exec("ALTER TABLE rooms ADD COLUMN public_token_hash TEXT NOT NULL DEFAULT ''");
+    const sessionColumns = this.db.prepare("PRAGMA table_info(guest_sessions)").all() as Array<{ name: string }>;
+    if (!sessionColumns.some((column) => column.name === "user_id")) this.db.exec("ALTER TABLE guest_sessions ADD COLUMN user_id TEXT");
+    if (!sessionColumns.some((column) => column.name === "revoked_at")) this.db.exec("ALTER TABLE guest_sessions ADD COLUMN revoked_at TEXT");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS room_event_command_type ON room_events(room_id, command_id, event_type) WHERE command_id IS NOT NULL");
   }
 
-  createSession(id: string, token: string, displayName: string, now: string, expiresAt: string): void {
-    this.db.prepare("INSERT INTO guest_sessions VALUES (?, ?, ?, ?, ?, ?)").run(id, hashToken(token), displayName, now, expiresAt, now);
+  createSession(id: string, token: string, displayName: string, now: string, expiresAt: string, userId: string | null = null): void {
+    this.db.prepare(`INSERT INTO guest_sessions
+      (id, token_hash, display_name, user_id, created_at, expires_at, last_seen_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`)
+      .run(id, hashToken(token), displayName, userId, now, expiresAt, now);
   }
 
-  resolveSession(token: string, now: string): { id: string; displayName: string } | undefined {
-    const row = this.db.prepare("SELECT id, display_name, expires_at FROM guest_sessions WHERE token_hash = ?").get(hashToken(token)) as { id: string; display_name: string; expires_at: string } | undefined;
-    if (!row || row.expires_at <= now) return undefined;
+  resolveSession(token: string, now: string): { id: string; displayName: string; userId?: string } | undefined {
+    const row = this.db.prepare("SELECT id, display_name, user_id, expires_at, revoked_at FROM guest_sessions WHERE token_hash = ?").get(hashToken(token)) as { id: string; display_name: string; user_id: string | null; expires_at: string; revoked_at: string | null } | undefined;
+    if (!row || row.expires_at <= now || row.revoked_at) return undefined;
     this.db.prepare("UPDATE guest_sessions SET last_seen_at = ? WHERE id = ?").run(now, row.id);
-    return { id: row.id, displayName: row.display_name };
+    return { id: row.id, displayName: row.display_name, ...(row.user_id ? { userId: row.user_id } : {}) };
+  }
+
+  createUserAndSession(input: { userId: string; email: string; passwordHash: string; displayName: string; sessionId: string; token: string; now: string; expiresAt: string }): void {
+    this.transaction(() => {
+      this.db.prepare("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)").run(input.userId, input.email, input.passwordHash, input.displayName, input.now, input.now);
+      this.createSession(input.sessionId, input.token, input.displayName, input.now, input.expiresAt, input.userId);
+    });
+  }
+
+  findUserByEmail(email: string): { id: string; email: string; passwordHash: string; displayName: string } | undefined {
+    const row = this.db.prepare("SELECT id, email, password_hash, display_name FROM users WHERE email = ?").get(email) as {
+      id: string; email: string; password_hash: string; display_name: string;
+    } | undefined;
+    return row ? { id: row.id, email: row.email, passwordHash: row.password_hash, displayName: row.display_name } : undefined;
+  }
+
+  touchUserLogin(userId: string, now: string): void { this.db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(now, userId); }
+  updateSessionDisplayName(sessionId: string, displayName: string): void { this.db.prepare("UPDATE guest_sessions SET display_name = ? WHERE id = ?").run(displayName, sessionId); }
+  revokeSession(sessionId: string, now: string): void { this.db.prepare("UPDATE guest_sessions SET revoked_at = ? WHERE id = ?").run(now, sessionId); }
+
+  userStats(sessionId: string, userId?: string) {
+    const where = userId ? "gs.user_id = ?" : "rm.session_id = ?";
+    const identity = userId ?? sessionId;
+    const awards = this.db.prepare(`SELECT r.primary_award AS award, COUNT(*) AS count
+      FROM rolls r JOIN room_members rm ON rm.id = r.member_id JOIN guest_sessions gs ON gs.id = rm.session_id
+      WHERE ${where} GROUP BY r.primary_award ORDER BY count DESC`).all(identity) as Array<{ award: string; count: number }>;
+    const totalRolls = awards.reduce((sum, row) => sum + Number(row.count), 0);
+    const prizes = this.db.prepare(`SELECT pp.tier, SUM(pc.quantity) AS quantity
+      FROM prize_claims pc JOIN prize_pools pp ON pp.id = pc.prize_pool_id
+      JOIN room_members rm ON rm.id = pc.member_id JOIN guest_sessions gs ON gs.id = rm.session_id
+      WHERE ${where} AND pc.status = 'FINAL' GROUP BY pp.tier`).all(identity) as Array<{ tier: string; quantity: number }>;
+    const games = this.db.prepare(`SELECT DISTINCT g.id, g.started_at, g.finished_at
+      FROM games g JOIN room_members rm ON rm.room_id = g.room_id JOIN guest_sessions gs ON gs.id = rm.session_id
+      WHERE ${where}`).all(identity) as Array<{ id: string; started_at: string; finished_at: string | null }>;
+    const playDurationMs = games.reduce((sum, game) => sum + (game.finished_at ? Math.max(0, Date.parse(game.finished_at) - Date.parse(game.started_at)) : 0), 0);
+    return {
+      totalRolls,
+      awards: awards.map((row) => ({ award: row.award, count: Number(row.count), frequency: totalRolls ? Number(row.count) / totalRolls : 0 })),
+      prizes: Object.fromEntries(prizes.map((row) => [row.tier, Number(row.quantity)])),
+      gamesPlayed: games.length,
+      completedGames: games.filter((game) => game.finished_at).length,
+      playDurationMs
+    };
   }
 
   saveNewRoom(room: Room, reportToken: string): void {

@@ -4,9 +4,11 @@ import { AppError } from "./errors.js";
 import type { Repository } from "./database.js";
 import type { RandomSource } from "./random.js";
 import type { Member, Room, RoomEvent, RollResolution, RoomSync } from "./types.js";
+import { hashPassword, verifyPassword } from "./password.js";
 
-export interface Session { id: string; displayName: string }
+export interface Session { id: string; displayName: string; userId?: string }
 const PRIZE_NAMES: Record<PrizeTier, string> = { CHAMPION: "状元", STRAIGHT: "对堂", THREE_REDS: "三红", FOUR_ADVANCES: "四进", TWO_RAISES: "二举", ONE_SHOW: "一秀" };
+const DUMMY_PASSWORD_HASH = await hashPassword("invalid-password-placeholder");
 
 export class RoomService {
   private readonly rooms = new Map<string, Room>();
@@ -38,6 +40,51 @@ export class RoomService {
     return { sessionId, token, expiresAt };
   }
 
+  async register(emailInput: string, password: string, displayNameInput: string) {
+    const email = this.validateEmail(emailInput);
+    const displayName = this.validateDisplayName(displayNameInput);
+    this.validatePassword(password);
+    if (this.repository.findUserByEmail(email)) throw new AppError("EMAIL_EXISTS", "该邮箱已经注册", 409);
+    const userId = this.random.id();
+    const sessionId = this.random.id();
+    const token = this.random.token();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30 * 86_400_000).toISOString();
+    this.repository.createUserAndSession({ userId, email, passwordHash: await hashPassword(password), displayName, sessionId, token, now: now.toISOString(), expiresAt });
+    return { sessionId, token, expiresAt, account: { id: userId, email, displayName } };
+  }
+
+  async login(emailInput: string, password: string) {
+    const email = this.validateEmail(emailInput);
+    const user = this.repository.findUserByEmail(email);
+    const valid = await verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    if (!user || !valid) throw new AppError("INVALID_CREDENTIALS", "邮箱或密码错误", 401);
+    const sessionId = this.random.id();
+    const token = this.random.token();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30 * 86_400_000).toISOString();
+    this.repository.createSession(sessionId, token, user.displayName, now.toISOString(), expiresAt, user.id);
+    this.repository.touchUserLogin(user.id, now.toISOString());
+    return { sessionId, token, expiresAt, account: { id: user.id, email: user.email, displayName: user.displayName } };
+  }
+
+  identity(session: Session) {
+    return { authenticated: Boolean(session.userId), sessionId: session.id, defaultDisplayName: session.displayName, ...(session.userId ? { userId: session.userId } : {}) };
+  }
+
+  stats(session: Session) {
+    if (!session.userId) throw new AppError("UNAUTHENTICATED", "登录后才能查看个人统计", 401);
+    return this.repository.userStats(session.id, session.userId);
+  }
+
+  updateSessionName(session: Session, displayNameInput: string) {
+    const displayName = this.validateDisplayName(displayNameInput);
+    this.repository.updateSessionDisplayName(session.id, displayName);
+    return { displayName };
+  }
+
+  logout(session: Session): void { this.repository.revokeSession(session.id, new Date().toISOString()); }
+
   authenticate(token: string | undefined): Session {
     if (!token) throw new AppError("UNAUTHENTICATED", "缺少会话令牌", 401);
     const session = this.repository.resolveSession(token, new Date().toISOString());
@@ -60,7 +107,7 @@ export class RoomService {
       id: this.random.id(), code, state: "LOBBY", version: 1, sequence: 0, hostMemberId: memberId,
       rulePresetId: "xiamen-traditional-v1", maxPlayers, outsideRule: { ...DEFAULT_OUTSIDE_RULE },
       prizeConfig: Object.entries(DEFAULT_PRIZES).map(([tier, quantity]) => ({ tier: tier as PrizeTier, displayName: PRIZE_NAMES[tier as PrizeTier], quantity })),
-      members: [{ id: memberId, sessionId: session.id, displayName: session.displayName, seatNo: 1, role: "HOST", status: "ACTIVE", online: false }],
+      members: [{ id: memberId, sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}), displayName: session.displayName, seatNo: 1, role: "HOST", status: "ACTIVE", online: false }],
       createdAt: new Date().toISOString()
     };
     const reportToken = this.random.token();
@@ -72,16 +119,17 @@ export class RoomService {
   joinRoom(session: Session, code: string): Room {
     const room = [...this.rooms.values()].find((candidate) => candidate.code === code.trim().toUpperCase());
     if (!room) throw new AppError("ROOM_NOT_FOUND", "房间不存在", 404);
-    const current = room.members.find((member) => member.sessionId === session.id && member.status === "ACTIVE");
+    const current = room.members.find((member) => (member.sessionId === session.id || Boolean(session.userId && member.userId === session.userId)) && member.status === "ACTIVE");
     if (current) return this.view(room);
     if (room.state !== "LOBBY") throw new AppError("ROOM_LOCKED", "房间已经开始，暂时不能加入", 409);
     if (room.members.filter((member) => member.status === "ACTIVE").length >= room.maxPlayers) throw new AppError("ROOM_FULL", "房间人数已满", 409);
     if (room.members.some((member) => member.status === "ACTIVE" && member.displayName === session.displayName)) throw new AppError("VALIDATION_FAILED", "房间内已有同名玩家，请换一个昵称", 409);
     const before = structuredClone(room);
-    room.members.push({ id: this.random.id(), sessionId: session.id, displayName: session.displayName, seatNo: room.members.length + 1, role: "PLAYER", status: "ACTIVE", online: false });
+    room.members.push({ id: this.random.id(), sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}), displayName: session.displayName, seatNo: room.members.length + 1, role: "PLAYER", status: "ACTIVE", online: false });
     room.version += 1;
     room.sequence += 1;
     const joinedMember = { ...room.members.at(-1)!, sessionId: "" };
+    delete joinedMember.userId;
     const event = this.event(room, { member: joinedMember }, this.random.id());
     try { this.repository.addMember(room, room.members.length - 1, event); } catch (error) { this.rooms.set(room.id, before); throw error; }
     return this.view(room);
@@ -89,26 +137,26 @@ export class RoomService {
 
   getRoom(session: Session, roomId: string): Room {
     const room = this.requireRoom(roomId);
-    this.requireMember(room, session.id);
+    this.requireMember(room, session);
     return this.view(room);
   }
 
   getRollPage(session: Session, roomId: string, afterTurn: number, limit: number) {
     const room = this.requireRoom(roomId);
-    this.requireMember(room, session.id);
+    this.requireMember(room, session);
     if (!room.game) return { items: [], nextCursor: null };
     return this.repository.rollPage(room.game.id, afterTurn, limit);
   }
 
   getReport(session: Session, roomId: string) {
     const room = this.requireRoom(roomId);
-    this.requireMember(room, session.id);
+    this.requireMember(room, session);
     return this.buildReport(room);
   }
 
   getReportCsv(session: Session, roomId: string): string {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     if (member.id !== room.hostMemberId) throw new AppError("NOT_HOST", "只有房主可以导出战报", 403);
     const report = this.buildReport(room);
     const escape = (value: unknown) => `"${String(value).replaceAll('"', '""')}"`;
@@ -125,7 +173,7 @@ export class RoomService {
 
   deleteReport(session: Session, roomId: string): void {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     if (member.id !== room.hostMemberId) throw new AppError("NOT_HOST", "只有房主可以删除战报", 403);
     if (room.state !== "FINISHED" && room.state !== "EXPIRED") throw new AppError("INVALID_ROOM_STATE", "只能删除已结束的战报", 409);
     this.repository.deleteRoom(room.id);
@@ -163,7 +211,7 @@ export class RoomService {
 
   syncRoom(session: Session, roomId: string, lastSequence: number): RoomSync {
     const room = this.requireRoom(roomId);
-    this.requireMember(room, session.id);
+    this.requireMember(room, session);
     if (lastSequence === room.sequence) return { mode: "events", events: [], roomVersion: room.version, sequence: room.sequence };
     const gap = room.sequence - lastSequence;
     if (lastSequence > 0 && gap > 0 && gap <= 200) {
@@ -175,7 +223,7 @@ export class RoomService {
 
   setPresence(session: Session, roomId: string, online: boolean): RoomEvent<{ memberId: string; online: boolean }> | undefined {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     if (member.online === online) return undefined;
     const before = structuredClone(room);
     member.online = online;
@@ -187,9 +235,24 @@ export class RoomService {
     return event;
   }
 
+  skipOfflineTurns(roomId: string): RoomEvent<Room> | undefined {
+    const room = this.requireRoom(roomId);
+    if (room.state !== "PLAYING" || !room.game || !this.currentMemberIsOffline(room)) return undefined;
+    const before = structuredClone(room);
+    this.advancePastOffline(room);
+    if (room.game.currentMemberId === before.game!.currentMemberId) return undefined;
+    this.finishIfEndingRoundComplete(room);
+    room.version += 1;
+    room.sequence += 1;
+    const event = this.event(room, this.view(room), this.random.id());
+    try { this.repository.saveStateEvent(room, event, "game:turn-changed", null, null); }
+    catch (error) { this.rooms.set(room.id, before); throw error; }
+    return event;
+  }
+
   startRoom(session: Session, roomId: string, expectedVersion?: number): Room {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     if (member.id !== room.hostMemberId) throw new AppError("NOT_HOST", "只有房主可以开始", 403);
     if (room.state !== "LOBBY") throw new AppError("INVALID_ROOM_STATE", "房间不在等待状态", 409);
     this.checkVersion(room, expectedVersion);
@@ -221,7 +284,7 @@ export class RoomService {
 
   roll(session: Session, roomId: string, commandId: string, throwProfile: ThrowProfile, expectedVersion?: number): { event: RoomEvent<RollResolution>; replayed: boolean } {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     if (!room.game) throw new AppError("INVALID_ROOM_STATE", "游戏尚未开始", 409);
     const prior = this.repository.findRoll(room.game.id, commandId);
     if (prior) {
@@ -256,17 +319,16 @@ export class RoomService {
     if (!room.game.ending && room.game.prizes.every((prize) => prize.remaining === 0)) {
       room.game.ending = { triggeredAtTurnNo: room.game.turnNo + 1, finishAfterRoundNo: room.game.roundNo + 1 };
     }
-    const nextMemberId = this.advanceTurn(room);
-    if (room.game.ending && room.game.roundNo > room.game.ending.finishAfterRoundNo) {
-      room.state = "FINISHED";
-      room.game.status = "FINISHED";
-    }
+    this.advanceTurn(room);
+    this.advancePastOffline(room);
+    this.finishIfEndingRoundComplete(room);
+    const nextMemberId = room.game.currentMemberId;
     room.version += 1;
     room.sequence += 1;
     const resolution: RollResolution = {
       rollId, memberId: member.id, outcome: outside ? "OUTSIDE" : "DICE", dice,
       outsideProbabilityBasisPoints: Math.round(probability * 10_000), visualSeed: this.random.token().slice(0, 22),
-      throwProfile, award, claims, nextMemberId, gameFinished: room.state === "FINISHED"
+      throwProfile, award, claims, nextMemberId, gameFinished: room.game.status === "FINISHED"
     };
     const eventId = this.random.id();
     const event = this.event(room, resolution, eventId);
@@ -288,6 +350,8 @@ export class RoomService {
       if (room.state !== "PAUSED") throw new AppError("INVALID_ROOM_STATE", "房间没有暂停", 409);
       room.state = "PLAYING";
       room.game!.status = "PLAYING";
+      this.advancePastOffline(room);
+      this.finishIfEndingRoundComplete(room);
     });
   }
 
@@ -295,10 +359,8 @@ export class RoomService {
     return this.changeState(session, roomId, commandId, "game:turn-changed", expectedVersion, (room) => {
       if (room.state !== "PLAYING") throw new AppError("INVALID_ROOM_STATE", "当前不能跳过玩家", 409);
       this.advanceTurn(room);
-      if (room.game!.ending && room.game!.roundNo > room.game!.ending.finishAfterRoundNo) {
-        room.state = "FINISHED";
-        room.game!.status = "FINISHED";
-      }
+      this.advancePastOffline(room);
+      this.finishIfEndingRoundComplete(room);
     });
   }
 
@@ -323,7 +385,7 @@ export class RoomService {
 
   leaveRoom(session: Session, roomId: string, commandId: string, expectedVersion?: number): { event: RoomEvent<Room>; replayed: boolean } {
     const room = this.requireRoom(roomId);
-    const member = room.members.find((candidate) => candidate.sessionId === session.id);
+    const member = room.members.find((candidate) => candidate.sessionId === session.id || Boolean(session.userId && candidate.userId === session.userId));
     if (!member) throw new AppError("NOT_A_MEMBER", "你不是该房间成员", 403);
     const prior = this.repository.findEvent<Room>(room.id, commandId, "room:member-updated");
     if (prior) return { event: prior, replayed: true };
@@ -360,7 +422,7 @@ export class RoomService {
 
   sendReaction(session: Session, roomId: string, commandId: string, reaction: "CHEER" | "CLAP" | "WOW" | "LUCK" | "LAUGH") {
     const room = this.requireRoom(roomId);
-    const member = this.requireMember(room, session.id);
+    const member = this.requireMember(room, session);
     const prior = this.repository.findEvent<{ memberId: string; reaction: string }>(room.id, commandId, "reaction:received");
     if (prior) return { event: prior, replayed: true };
     const before = structuredClone(room);
@@ -380,7 +442,7 @@ export class RoomService {
     mutate: (room: Room) => void
   ): { event: RoomEvent<Room>; replayed: boolean } {
     const room = this.requireRoom(roomId);
-    const actor = this.requireMember(room, session.id);
+    const actor = this.requireMember(room, session);
     const prior = this.repository.findEvent<Room>(room.id, commandId, eventType);
     if (prior) return { event: prior, replayed: true };
     if (actor.id !== room.hostMemberId) throw new AppError("NOT_HOST", "只有房主可以执行此操作", 403);
@@ -406,6 +468,31 @@ export class RoomService {
     return game.currentMemberId;
   }
 
+  private currentMemberIsOffline(room: Room): boolean {
+    const current = room.members.find((member) => member.status === "ACTIVE" && member.id === room.game?.currentMemberId);
+    return Boolean(current && !current.online && room.members.some((member) => member.status === "ACTIVE" && member.online));
+  }
+
+  private advancePastOffline(room: Room): void {
+    const active = room.members.filter((member) => member.status === "ACTIVE");
+    if (!active.some((member) => member.online)) return;
+    for (let skipped = 0; skipped < active.length && this.currentMemberIsOffline(room); skipped += 1) {
+      this.advanceTurn(room);
+      if (this.endingRoundComplete(room)) break;
+    }
+  }
+
+  private finishIfEndingRoundComplete(room: Room): void {
+    if (this.endingRoundComplete(room)) {
+      room.state = "FINISHED";
+      room.game!.status = "FINISHED";
+    }
+  }
+
+  private endingRoundComplete(room: Room): boolean {
+    return Boolean(room.game?.ending && room.game.roundNo > room.game.ending.finishAfterRoundNo);
+  }
+
   private event<T>(room: Room, payload: T, eventId: string): RoomEvent<T> {
     return { protocolVersion: 1, eventId, roomId: room.id, sequence: room.sequence, roomVersion: room.version, occurredAt: new Date().toISOString(), payload };
   }
@@ -416,8 +503,10 @@ export class RoomService {
     return room;
   }
 
-  private requireMember(room: Room, sessionId: string): Member {
-    const member = room.members.find((candidate) => candidate.sessionId === sessionId && candidate.status === "ACTIVE");
+  private requireMember(room: Room, session: Session): Member {
+    const member = room.members.find((candidate) =>
+      candidate.status === "ACTIVE" && (candidate.sessionId === session.id || Boolean(session.userId && candidate.userId === session.userId))
+    );
     if (!member) throw new AppError("NOT_A_MEMBER", "你不是该房间成员", 403);
     return member;
   }
@@ -428,7 +517,23 @@ export class RoomService {
 
   private view(room: Room): Room {
     const copy = structuredClone(room);
-    for (const member of copy.members) member.sessionId = "";
+    for (const member of copy.members) { member.sessionId = ""; delete member.userId; }
     return copy;
+  }
+
+  private validateDisplayName(input: string): string {
+    const value = input.trim();
+    if (value.length < 1 || value.length > 24 || /[\u0000-\u001f\u007f]/.test(value)) throw new AppError("VALIDATION_FAILED", "名字应为 1～24 个可见字符");
+    return value;
+  }
+
+  private validateEmail(input: string): string {
+    const value = input.trim().toLowerCase();
+    if (value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new AppError("VALIDATION_FAILED", "邮箱格式不正确");
+    return value;
+  }
+
+  private validatePassword(password: string): void {
+    if (password.length < 8 || password.length > 128) throw new AppError("VALIDATION_FAILED", "密码长度应为 8～128 个字符");
   }
 }

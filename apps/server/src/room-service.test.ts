@@ -75,6 +75,35 @@ describe("room service", () => {
     if (recoverySync.mode === "events") expect(recoverySync.events[0]?.type).toBe("room:presence-reset");
   });
 
+  it("automatically skips offline turns but waits when everyone is offline", () => {
+    repository = new Repository(":memory:");
+    const service = new RoomService(repository, deterministicRandom());
+    const host = service.authenticate(service.createSession("房主").token);
+    const player = service.authenticate(service.createSession("离线玩家").token);
+    const third = service.authenticate(service.createSession("在线玩家").token);
+    const created = service.createRoom(host);
+    service.joinRoom(player, created.code);
+    const joined = service.joinRoom(third, created.code);
+
+    service.setPresence(host, created.id, true);
+    service.setPresence(third, created.id, true);
+    const started = service.startRoom(host, created.id);
+    const profile = { start: { x: 0, y: 0 }, direction: { x: 0, y: 1 }, strength: 0.7, holdDurationMs: 500 };
+    const rolled = service.roll(host, created.id, "auto-skip-after-roll", profile, started.version);
+    expect(rolled.event.payload.nextMemberId).toBe(joined.members[2]!.id);
+    expect(rolled.event.payload.nextMemberId).not.toBe(joined.members[1]!.id);
+
+    service.setPresence(host, created.id, false);
+    service.setPresence(third, created.id, false);
+    expect(service.skipOfflineTurns(created.id)).toBeUndefined();
+    expect(service.getRoom(host, created.id).game?.currentMemberId).toBe(joined.members[2]!.id);
+
+    service.setPresence(host, created.id, true);
+    const skipped = service.skipOfflineTurns(created.id)!;
+    expect(skipped.payload.game?.currentMemberId).toBe(joined.members[0]!.id);
+    expect(skipped.payload.game?.turnNo).toBe(3);
+  });
+
   it("supports idempotent host controls and host transfer", () => {
     repository = new Repository(":memory:");
     const service = new RoomService(repository, deterministicRandom());

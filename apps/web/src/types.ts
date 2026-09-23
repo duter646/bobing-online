@@ -11,7 +11,9 @@ export interface RoomEvent<T=unknown>{protocolVersion:1;eventId:string;roomId:st
 export interface StoredRoomEvent{type:string;event:RoomEvent}
 export type RoomSync={mode:"snapshot";snapshot:Room}|{mode:"events";events:StoredRoomEvent[];roomVersion:number;sequence:number};
 export type Ack<T>={ok:true;commandId:string;data:T}|{ok:false;commandId:string;error:ProtocolError};
-export interface Session{sessionId:string;token:string;displayName:string;expiresAt:string}
+export interface Account{id:string;email:string;displayName:string}
+export interface Session{sessionId:string;token:string;displayName:string;expiresAt:string;account?:Account}
+export interface UserStats{totalRolls:number;awards:Array<{award:string;count:number;frequency:number}>;prizes:Record<string,number>;gamesPlayed:number;completedGames:number;playDurationMs:number}
 export interface PlayerReport{memberId:string;displayName:string;seatNo:number;totalRolls:number;awards:Record<string,number>;prizes:Record<string,number>}
 export interface Report{roomId:string;code:string;state:RoomState;createdAt:string;champion:Game["champion"]|null;prizes:PrizePool[];totalRolls:number;players:PlayerReport[]}
 export interface Reaction{id:string;memberId:string;value:string}
